@@ -54,6 +54,9 @@ struct gic_chip_data {
 	unsigned int		irq_nr;
 };
 
+static bool main_gic_init = false;
+
+/* presents the main gic node */
 static struct gic_chip_data gic_data __read_mostly;
 static struct static_key supports_deactivate = STATIC_KEY_INIT_TRUE;
 
@@ -903,6 +906,11 @@ static int __init gic_validate_dist_version(void __iomem *dist_base)
 	return 0;
 }
 
+static int auxiliary_gic_init(void __iomem *dist_base)
+{
+	return 0;
+}
+
 static void __init gic_of_setup_kvm_info(struct device_node *node)
 {
 	int ret;
@@ -958,6 +966,11 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 		goto out_unmap_dist;
 	}
 
+	if (main_gic_init) {
+		auxiliary_gic_init(dist_base);
+		return 0;
+	}
+
 	if (of_property_read_u32(node, "#redistributor-regions", &nr_redist_regions))
 		nr_redist_regions = 1;
 
@@ -995,6 +1008,7 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 			     redist_stride, &node->fwnode);
 	if (!err) {
 		gic_of_setup_kvm_info(node);
+		main_gic_init = true;
 		return 0;
 	}
 
