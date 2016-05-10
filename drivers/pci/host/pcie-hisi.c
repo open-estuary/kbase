@@ -21,20 +21,13 @@
 #include <linux/regmap.h>
 
 #include "pcie-designware.h"
+#include "pcie-hisi.h"
 
-#define PCIE_LTSSM_LINKUP_STATE				0x11
-#define PCIE_LTSSM_STATE_MASK				0x3F
 #define PCIE_SUBCTRL_SYS_STATE4_REG			0x6818
 #define PCIE_SYS_STATE4						0x31c
 #define PCIE_HIP06_CTRL_OFF					0x1000
 
 #define to_hisi_pcie(x)	container_of(x, struct hisi_pcie, pp)
-
-struct hisi_pcie;
-
-struct pcie_soc_ops {
-	int (*hisi_pcie_link_up)(struct hisi_pcie *pcie);
-};
 
 struct hisi_pcie {
 	struct regmap *subctrl;
@@ -44,87 +37,36 @@ struct hisi_pcie {
 	struct pcie_soc_ops *soc_ops;
 };
 
-static inline void hisi_pcie_apb_writel(struct hisi_pcie *pcie,
-					u32 val, u32 reg)
+struct pcie_soc_ops {
+	int (*hisi_pcie_link_up)(struct hisi_pcie *pcie);
+};
+
+static inline int hisi_rd_ecam_conf(struct pcie_port *pp, struct pci_bus *bus,
+		unsigned int devfn, int where, int size, u32 *value)
 {
-	writel(val, pcie->reg_base + reg);
+	return pci_generic_config_read(bus, devfn, where, size, value);
 }
 
-static inline u32 hisi_pcie_apb_readl(struct hisi_pcie *pcie, u32 reg)
+static inline int hisi_wr_ecam_conf(struct pcie_port *pp, struct pci_bus *bus,
+		unsigned int devfn, int where, int size, u32 value)
 {
-	return readl(pcie->reg_base + reg);
+	return pci_generic_config_write(bus, devfn, where, size, value);
 }
 
-/* HipXX PCIe host only supports 32-bit config access */
-static int hisi_pcie_cfg_read(struct pcie_port *pp, int where, int size,
-			      u32 *val)
+static inline int hisi_pcie_cfg_read(struct pcie_port *pp, int where,
+		int size, u32 *val)
 {
-	u32 reg;
-	u32 reg_val;
 	struct hisi_pcie *pcie = to_hisi_pcie(pp);
-	void *walker = &reg_val;
 
-	walker += (where & 0x3);
-	reg = where & ~0x3;
-	reg_val = hisi_pcie_apb_readl(pcie, reg);
-
-	if (size == 1)
-		*val = *(u8 __force *) walker;
-	else if (size == 2)
-		*val = *(u16 __force *) walker;
-	else if (size == 4)
-		*val = reg_val;
-	else
-		return PCIBIOS_BAD_REGISTER_NUMBER;
-
-	return PCIBIOS_SUCCESSFUL;
+	return hisi_pcie_common_cfg_read(pcie->reg_base, where, size, val);
 }
 
-/* HipXX PCIe host only supports 32-bit config access */
-static int hisi_pcie_cfg_write(struct pcie_port *pp, int where, int  size,
-				u32 val)
+static inline int hisi_pcie_cfg_write(struct pcie_port *pp, int where,
+		int size, u32 val)
 {
-	u32 reg_val;
-	u32 reg;
 	struct hisi_pcie *pcie = to_hisi_pcie(pp);
-	void *walker = &reg_val;
 
-	walker += (where & 0x3);
-	reg = where & ~0x3;
-	if (size == 4)
-		hisi_pcie_apb_writel(pcie, val, reg);
-	else if (size == 2) {
-		reg_val = hisi_pcie_apb_readl(pcie, reg);
-		*(u16 __force *) walker = val;
-		hisi_pcie_apb_writel(pcie, reg_val, reg);
-	} else if (size == 1) {
-		reg_val = hisi_pcie_apb_readl(pcie, reg);
-		*(u8 __force *) walker = val;
-		hisi_pcie_apb_writel(pcie, reg_val, reg);
-	} else
-		return PCIBIOS_BAD_REGISTER_NUMBER;
-
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int hisi_pcie_link_up_hip05(struct hisi_pcie *hisi_pcie)
-{
-	u32 val;
-
-	regmap_read(hisi_pcie->subctrl, PCIE_SUBCTRL_SYS_STATE4_REG +
-		    0x100 * hisi_pcie->port_id, &val);
-
-	return ((val & PCIE_LTSSM_STATE_MASK) == PCIE_LTSSM_LINKUP_STATE);
-}
-
-static int hisi_pcie_link_up_hip06(struct hisi_pcie *hisi_pcie)
-{
-	u32 val;
-
-	val = hisi_pcie_apb_readl(hisi_pcie, PCIE_HIP06_CTRL_OFF +
-			PCIE_SYS_STATE4);
-
-	return ((val & PCIE_LTSSM_STATE_MASK) == PCIE_LTSSM_LINKUP_STATE);
+	return hisi_pcie_common_cfg_write(pcie->reg_base, where, size, val);
 }
 
 static int hisi_pcie_link_up(struct pcie_port *pp)
@@ -134,11 +76,25 @@ static int hisi_pcie_link_up(struct pcie_port *pp)
 	return hisi_pcie->soc_ops->hisi_pcie_link_up(hisi_pcie);
 }
 
-static struct pcie_host_ops hisi_pcie_host_ops = {
-	.rd_own_conf = hisi_pcie_cfg_read,
-	.wr_own_conf = hisi_pcie_cfg_write,
-	.link_up = hisi_pcie_link_up,
+struct pcie_host_ops hisi_pcie_host_ops = {
+		.rd_own_conf = hisi_pcie_cfg_read,
+		.wr_own_conf = hisi_pcie_cfg_write,
+		.link_up = hisi_pcie_link_up,
 };
+
+static void __iomem *hisi_pci_map_cfg_bus_cam(struct pci_bus *bus,
+					     unsigned int devfn,
+					     int where)
+{
+	void __iomem *addr;
+	struct pcie_port *pp = bus->sysdata;
+
+	addr = pp->va_cfg1_base - (pp->busn->start << 20) +
+			((bus->number << 20) | (devfn << 12)) +
+			where;
+
+	return addr;
+}
 
 static int hisi_add_pcie_port(struct pcie_port *pp,
 				     struct platform_device *pdev)
@@ -204,6 +160,23 @@ static int hisi_pcie_probe(struct platform_device *pdev)
 
 	hisi_pcie->pp.dbi_base = hisi_pcie->reg_base;
 
+	reg = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ecam-cfg");
+	if (reg) {
+		/* ECAM driver version */
+		hisi_pcie->pp.va_cfg0_base =
+				devm_ioremap_resource(&pdev->dev, reg);
+		if (IS_ERR(hisi_pcie->pp.va_cfg0_base)) {
+			dev_err(pp->dev, "cannot get ecam-cfg\n");
+			return PTR_ERR(hisi_pcie->pp.va_cfg0_base);
+		}
+		hisi_pcie->pp.va_cfg1_base = hisi_pcie->pp.va_cfg0_base;
+
+		dw_pcie_ops.map_bus = hisi_pci_map_cfg_bus_cam;
+
+		hisi_pcie_host_ops.rd_other_conf = hisi_rd_ecam_conf;
+		hisi_pcie_host_ops.wr_other_conf = hisi_wr_ecam_conf;
+	}
+
 	ret = hisi_add_pcie_port(pp, pdev);
 	if (ret)
 		return ret;
@@ -213,6 +186,26 @@ static int hisi_pcie_probe(struct platform_device *pdev)
 	dev_warn(pp->dev, "only 32-bit config accesses supported; smaller writes may corrupt adjacent RW1C fields\n");
 
 	return 0;
+}
+
+static int hisi_pcie_link_up_hip05(struct hisi_pcie *hisi_pcie)
+{
+	u32 val;
+
+	regmap_read(hisi_pcie->subctrl, PCIE_SUBCTRL_SYS_STATE4_REG +
+		    0x100 * hisi_pcie->port_id, &val);
+
+	return ((val & PCIE_LTSSM_STATE_MASK) == PCIE_LTSSM_LINKUP_STATE);
+}
+
+static int hisi_pcie_link_up_hip06(struct hisi_pcie *hisi_pcie)
+{
+	u32 val;
+
+	val = readl(hisi_pcie->reg_base + PCIE_HIP06_CTRL_OFF +
+			PCIE_SYS_STATE4);
+
+	return ((val & PCIE_LTSSM_STATE_MASK) == PCIE_LTSSM_LINKUP_STATE);
 }
 
 static struct pcie_soc_ops hip05_ops = {
