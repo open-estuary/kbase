@@ -34,6 +34,8 @@ enum dev_dma_attr {
 };
 
 bool device_property_present(struct device *dev, const char *propname);
+struct
+platform_device *fwnode_find_platform_device(struct fwnode_handle *fwnode);
 int device_property_read_u8_array(struct device *dev, const char *propname,
 				  u8 *val, size_t nval);
 int device_property_read_u16_array(struct device *dev, const char *propname,

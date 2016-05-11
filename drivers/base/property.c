@@ -18,6 +18,7 @@
 #include <linux/property.h>
 #include <linux/etherdevice.h>
 #include <linux/phy.h>
+#include <linux/platform_device.h>
 
 static inline bool is_pset_node(struct fwnode_handle *fwnode)
 {
@@ -64,6 +65,29 @@ static void *pset_prop_find(struct property_set *pset, const char *propname,
 		return ERR_PTR(-EOVERFLOW);
 	return pointer;
 }
+
+static int fwnode_dev_match(struct device *dev, void *fwnode)
+{
+	return dev->fwnode == fwnode;
+}
+
+/**
+ * fwnode_find_platform_device -
+ *	Find the platform_device associated with a Firmware node
+ * @fwnode: Pointer to Firmware node to find device
+ *
+ * Returns platform_device pointer, or NULL if not found
+ */
+struct
+platform_device *fwnode_find_platform_device(struct fwnode_handle *fwnode)
+{
+	struct device *dev;
+
+	dev = bus_find_device(&platform_bus_type, NULL,
+			      fwnode, fwnode_dev_match);
+	return dev ? to_platform_device(dev) : NULL;
+}
+EXPORT_SYMBOL(fwnode_find_platform_device);
 
 static int pset_prop_read_u8_array(struct property_set *pset,
 				   const char *propname,
