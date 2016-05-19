@@ -859,8 +859,7 @@ struct rtl8169_private {
 MODULE_AUTHOR("Realtek and the Linux r8169 crew <netdev@vger.kernel.org>");
 MODULE_DESCRIPTION("RealTek RTL-8169 Gigabit Ethernet driver");
 module_param(use_dac, int, 0);
-MODULE_PARM_DESC(use_dac,
-	"Enable PCI DAC. Unsafe on 32 bit PCI slot (default -1: enable on 64-bit archs only if needed");
+MODULE_PARM_DESC(use_dac, "Enable PCI DAC. Unsafe on 32 bit PCI slot.");
 module_param_named(debug, debug.msg_enable, int, 0);
 MODULE_PARM_DESC(debug, "Debug verbosity level (0=none, ..., 16=all)");
 MODULE_LICENSE("GPL");
@@ -8225,24 +8224,6 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_out_mwi_2;
 	}
 
-	tp->cp_cmd = 0;
-
-	/* Tentatively set the DMA mask to 32 bits. This may fail
-	 * on 64-bit architectures without any RAM below 4 GB.
-	 */
-	rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
-	if ((sizeof(dma_addr_t) > 4) &&
-	    (use_dac == 1 || (use_dac == -1 && rc < 0)) &&
-	    !pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
-		tp->cp_cmd |= PCIDAC;
-		dev->features |= NETIF_F_HIGHDMA;
-	} else {
-		if (rc < 0) {
-			netif_err(tp, probe, dev, "DMA configuration failed\n");
-			goto err_out_free_res_3;
-		}
-	}
-
 	/* ioremap MMIO region */
 	ioaddr = ioremap(pci_resource_start(pdev, region), R8169_REGS_SIZE);
 	if (!ioaddr) {
@@ -8257,6 +8238,25 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	/* Identify chip attached to board */
 	rtl8169_get_mac_version(tp, dev, cfg->default_ver);
+
+	tp->cp_cmd = 0;
+
+	if ((sizeof(dma_addr_t) > 4) &&
+	    (use_dac == 1 || (use_dac == -1 && pci_is_pcie(pdev) &&
+			      tp->mac_version >= RTL_GIGA_MAC_VER_18)) &&
+	    !pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
+
+		/* CPlusCmd Dual Access Cycle is only needed for non-PCIe */
+		if (!pci_is_pcie(pdev))
+			tp->cp_cmd |= PCIDAC;
+		dev->features |= NETIF_F_HIGHDMA;
+	} else {
+		rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+		if (rc < 0) {
+			netif_err(tp, probe, dev, "DMA configuration failed\n");
+			goto err_out_unmap_4;
+		}
+	}
 
 	rtl_init_rxcfg(tp);
 
@@ -8417,12 +8417,12 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 					   &tp->counters_phys_addr, GFP_KERNEL);
 	if (!tp->counters) {
 		rc = -ENOMEM;
-		goto err_out_msi_4;
+		goto err_out_msi_5;
 	}
 
 	rc = register_netdev(dev);
 	if (rc < 0)
-		goto err_out_cnt_5;
+		goto err_out_cnt_6;
 
 	pci_set_drvdata(pdev, dev);
 
@@ -8456,12 +8456,13 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 out:
 	return rc;
 
-err_out_cnt_5:
+err_out_cnt_6:
 	dma_free_coherent(&pdev->dev, sizeof(*tp->counters), tp->counters,
 			  tp->counters_phys_addr);
-err_out_msi_4:
+err_out_msi_5:
 	netif_napi_del(&tp->napi);
 	rtl_disable_msi(pdev, tp);
+err_out_unmap_4:
 	iounmap(ioaddr);
 err_out_free_res_3:
 	pci_release_regions(pdev);
