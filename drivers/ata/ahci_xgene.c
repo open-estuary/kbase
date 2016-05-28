@@ -651,6 +651,7 @@ static struct scsi_host_template ahci_platform_sht = {
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id xgene_ahci_acpi_match[] = {
+	{ "APMC0D09", XGENE_AHCI_V1},
 	{ "APMC0D0D", XGENE_AHCI_V1},
 	{ "APMC0D32", XGENE_AHCI_V2},
 	{},
@@ -739,9 +740,9 @@ static int xgene_ahci_probe(struct platform_device *pdev)
 				dev_warn(&pdev->dev, "%s: Error reading device info. Assume version1\n",
 					__func__);
 				version = XGENE_AHCI_V1;
-			}
-			if (info->valid & ACPI_VALID_CID)
+			} else if (info->valid & ACPI_VALID_CID) {
 				version = XGENE_AHCI_V2;
+			}
 		}
 	}
 #endif
