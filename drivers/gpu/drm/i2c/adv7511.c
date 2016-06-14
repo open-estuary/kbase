@@ -422,16 +422,10 @@ static void adv7511_dsi_receiver_dpms(struct adv7511 *adv7511)
 		/* set number of dsi lanes */
 		regmap_write(adv7511->regmap_cec, 0x1c, dsi->lanes << 4);
 
-#if 0
 		/* reset internal timing generator */
 		regmap_write(adv7511->regmap_cec, 0x27, 0xcb);
 		regmap_write(adv7511->regmap_cec, 0x27, 0x8b);
 		regmap_write(adv7511->regmap_cec, 0x27, 0xcb);
-#else
-		/* disable internal timing generator */
-		regmap_write(adv7511->regmap_cec, 0x27, 0x0b);
-#endif
-
 
 		/* enable hdmi */
 		regmap_write(adv7511->regmap_cec, 0x03, 0x89);
@@ -802,28 +796,12 @@ adv7511_detect(struct adv7511 *adv7511,
 }
 
 static int adv7511_mode_valid(struct adv7511 *adv7511,
-				     struct drm_display_mode *mode)
+				     const struct drm_display_mode *mode)
 {
 	if (mode->clock > 165000)
 		return MODE_CLOCK_HIGH;
-	/*
-	 * some work well modes which want to put in the front of the mode list.
-	 */
-	DRM_DEBUG("Checking mode %ix%i@%i clock: %i...",
-		  mode->hdisplay, mode->vdisplay, drm_mode_vrefresh(mode), mode->clock);
-	if ((mode->hdisplay == 1920 && mode->vdisplay == 1080 && mode->clock == 148500) ||
-	    (mode->hdisplay == 1280 && mode->vdisplay == 800 && mode->clock == 83496) ||
-	    (mode->hdisplay == 1280 && mode->vdisplay == 720 && mode->clock == 74440) ||
-	    (mode->hdisplay == 1280 && mode->vdisplay == 720 && mode->clock == 74250) ||
-	    (mode->hdisplay == 1024 && mode->vdisplay == 768 && mode->clock == 75000) ||
-	    (mode->hdisplay == 1024 && mode->vdisplay == 768 && mode->clock == 81833) ||
-	    (mode->hdisplay == 800 && mode->vdisplay == 600 && mode->clock == 40000)) {
-		mode->type |= DRM_MODE_TYPE_PREFERRED;
-		DRM_DEBUG("OK\n");
-		return MODE_OK;
-	}
-	DRM_DEBUG("BAD\n");
-	return MODE_BAD;
+
+	return MODE_OK;
 }
 
 static void adv7511_mode_set(struct adv7511 *adv7511,
