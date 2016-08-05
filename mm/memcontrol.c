@@ -196,6 +196,7 @@ static void mem_cgroup_oom_notify(struct mem_cgroup *memcg);
 /* "mc" and its members are protected by cgroup_mutex */
 static struct move_charge_struct {
 	spinlock_t	  lock; /* for from, to */
+	struct mm_struct  *mm;
 	struct mem_cgroup *from;
 	struct mem_cgroup *to;
 	unsigned long flags;
@@ -903,14 +904,20 @@ struct mem_cgroup *mem_cgroup_iter(struct mem_cgroup *root,
 		if (prev && reclaim->generation != iter->generation)
 			goto out_unlock;
 
-		do {
+		while (1) {
 			pos = READ_ONCE(iter->position);
+			if (!pos || css_tryget(&pos->css))
+				break;
 			/*
-			 * A racing update may change the position and
-			 * put the last reference, hence css_tryget(),
-			 * or retry to see the updated position.
+			 * css reference reached zero, so iter->position will
+			 * be cleared by ->css_released. However, we should not
+			 * rely on this happening soon, because ->css_released
+			 * is called from a work queue, and by busy-waiting we
+			 * might block it. So we clear iter->position right
+			 * away.
 			 */
-		} while (pos && !css_tryget(&pos->css));
+			(void)cmpxchg(&iter->position, pos, NULL);
+		}
 	}
 
 	if (pos)
@@ -956,17 +963,13 @@ struct mem_cgroup *mem_cgroup_iter(struct mem_cgroup *root,
 	}
 
 	if (reclaim) {
-		if (cmpxchg(&iter->position, pos, memcg) == pos) {
-			if (memcg)
-				css_get(&memcg->css);
-			if (pos)
-				css_put(&pos->css);
-		}
-
 		/*
-		 * pairs with css_tryget when dereferencing iter->position
-		 * above.
+		 * The position could have already been updated by a competing
+		 * thread, so check that the value hasn't changed since we read
+		 * it to avoid reclaiming from the same cgroup twice.
 		 */
+		(void)cmpxchg(&iter->position, pos, memcg);
+
 		if (pos)
 			css_put(&pos->css);
 
@@ -997,6 +1000,28 @@ void mem_cgroup_iter_break(struct mem_cgroup *root,
 		root = root_mem_cgroup;
 	if (prev && prev != root)
 		css_put(&prev->css);
+}
+
+static void invalidate_reclaim_iterators(struct mem_cgroup *dead_memcg)
+{
+	struct mem_cgroup *memcg = dead_memcg;
+	struct mem_cgroup_reclaim_iter *iter;
+	struct mem_cgroup_per_zone *mz;
+	int nid, zid;
+	int i;
+
+	while ((memcg = parent_mem_cgroup(memcg))) {
+		for_each_node(nid) {
+			for (zid = 0; zid < MAX_NR_ZONES; zid++) {
+				mz = &memcg->nodeinfo[nid]->zoneinfo[zid];
+				for (i = 0; i <= DEF_PRIORITY; i++) {
+					iter = &mz->iter[i];
+					cmpxchg(&iter->position,
+						dead_memcg, NULL);
+				}
+			}
+		}
+	}
 }
 
 /*
@@ -1308,7 +1333,7 @@ static unsigned long mem_cgroup_get_limit(struct mem_cgroup *memcg)
 	return limit;
 }
 
-static void mem_cgroup_out_of_memory(struct mem_cgroup *memcg, gfp_t gfp_mask,
+static bool mem_cgroup_out_of_memory(struct mem_cgroup *memcg, gfp_t gfp_mask,
 				     int order)
 {
 	struct oom_control oc = {
@@ -1386,6 +1411,7 @@ static void mem_cgroup_out_of_memory(struct mem_cgroup *memcg, gfp_t gfp_mask,
 	}
 unlock:
 	mutex_unlock(&oom_lock);
+	return chosen;
 }
 
 #if MAX_NUMNODES > 1
@@ -3498,16 +3524,17 @@ static void __mem_cgroup_usage_unregister_event(struct mem_cgroup *memcg,
 swap_buffers:
 	/* Swap primary and spare array */
 	thresholds->spare = thresholds->primary;
-	/* If all events are unregistered, free the spare array */
-	if (!new) {
-		kfree(thresholds->spare);
-		thresholds->spare = NULL;
-	}
 
 	rcu_assign_pointer(thresholds->primary, new);
 
 	/* To be sure that nobody uses thresholds */
 	synchronize_rcu();
+
+	/* If all events are unregistered, free the spare array */
+	if (!new) {
+		kfree(thresholds->spare);
+		thresholds->spare = NULL;
+	}
 unlock:
 	mutex_unlock(&memcg->thresholds_lock);
 }
@@ -4324,6 +4351,13 @@ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 	wb_memcg_offline(memcg);
 }
 
+static void mem_cgroup_css_released(struct cgroup_subsys_state *css)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	invalidate_reclaim_iterators(memcg);
+}
+
 static void mem_cgroup_css_free(struct cgroup_subsys_state *css)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
@@ -4767,6 +4801,8 @@ static void __mem_cgroup_clear_mc(void)
 
 static void mem_cgroup_clear_mc(void)
 {
+	struct mm_struct *mm = mc.mm;
+
 	/*
 	 * we must clear moving_task before waking up waiters at the end of
 	 * task migration.
@@ -4776,7 +4812,10 @@ static void mem_cgroup_clear_mc(void)
 	spin_lock(&mc.lock);
 	mc.from = NULL;
 	mc.to = NULL;
+	mc.mm = NULL;
 	spin_unlock(&mc.lock);
+
+	mmput(mm);
 }
 
 static int mem_cgroup_can_attach(struct cgroup_taskset *tset)
@@ -4833,6 +4872,7 @@ static int mem_cgroup_can_attach(struct cgroup_taskset *tset)
 		VM_BUG_ON(mc.moved_swap);
 
 		spin_lock(&mc.lock);
+		mc.mm = mm;
 		mc.from = from;
 		mc.to = memcg;
 		mc.flags = move_flags;
@@ -4842,8 +4882,9 @@ static int mem_cgroup_can_attach(struct cgroup_taskset *tset)
 		ret = mem_cgroup_precharge_mc(mm);
 		if (ret)
 			mem_cgroup_clear_mc();
+	} else {
+		mmput(mm);
 	}
-	mmput(mm);
 	return ret;
 }
 
@@ -4952,11 +4993,11 @@ put:			/* get_mctgt_type() gets the page */
 	return ret;
 }
 
-static void mem_cgroup_move_charge(struct mm_struct *mm)
+static void mem_cgroup_move_charge(void)
 {
 	struct mm_walk mem_cgroup_move_charge_walk = {
 		.pmd_entry = mem_cgroup_move_charge_pte_range,
-		.mm = mm,
+		.mm = mc.mm,
 	};
 
 	lru_add_drain_all();
@@ -4968,7 +5009,7 @@ static void mem_cgroup_move_charge(struct mm_struct *mm)
 	atomic_inc(&mc.from->moving_account);
 	synchronize_rcu();
 retry:
-	if (unlikely(!down_read_trylock(&mm->mmap_sem))) {
+	if (unlikely(!down_read_trylock(&mc.mm->mmap_sem))) {
 		/*
 		 * Someone who are holding the mmap_sem might be waiting in
 		 * waitq. So we cancel all extra charges, wake up all waiters,
@@ -4985,23 +5026,16 @@ retry:
 	 * additional charge, the page walk just aborts.
 	 */
 	walk_page_range(0, ~0UL, &mem_cgroup_move_charge_walk);
-	up_read(&mm->mmap_sem);
+	up_read(&mc.mm->mmap_sem);
 	atomic_dec(&mc.from->moving_account);
 }
 
-static void mem_cgroup_move_task(struct cgroup_taskset *tset)
+static void mem_cgroup_move_task(void)
 {
-	struct cgroup_subsys_state *css;
-	struct task_struct *p = cgroup_taskset_first(tset, &css);
-	struct mm_struct *mm = get_task_mm(p);
-
-	if (mm) {
-		if (mc.to)
-			mem_cgroup_move_charge(mm);
-		mmput(mm);
-	}
-	if (mc.to)
+	if (mc.to) {
+		mem_cgroup_move_charge();
 		mem_cgroup_clear_mc();
+	}
 }
 #else	/* !CONFIG_MMU */
 static int mem_cgroup_can_attach(struct cgroup_taskset *tset)
@@ -5011,7 +5045,7 @@ static int mem_cgroup_can_attach(struct cgroup_taskset *tset)
 static void mem_cgroup_cancel_attach(struct cgroup_taskset *tset)
 {
 }
-static void mem_cgroup_move_task(struct cgroup_taskset *tset)
+static void mem_cgroup_move_task(void)
 {
 }
 #endif
@@ -5089,6 +5123,7 @@ static ssize_t memory_high_write(struct kernfs_open_file *of,
 				 char *buf, size_t nbytes, loff_t off)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	unsigned long nr_pages;
 	unsigned long high;
 	int err;
 
@@ -5098,6 +5133,11 @@ static ssize_t memory_high_write(struct kernfs_open_file *of,
 		return err;
 
 	memcg->high = high;
+
+	nr_pages = page_counter_read(&memcg->memory);
+	if (nr_pages > high)
+		try_to_free_mem_cgroup_pages(memcg, nr_pages - high,
+					     GFP_KERNEL, true);
 
 	memcg_wb_domain_size_changed(memcg);
 	return nbytes;
@@ -5120,6 +5160,8 @@ static ssize_t memory_max_write(struct kernfs_open_file *of,
 				char *buf, size_t nbytes, loff_t off)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	unsigned int nr_reclaims = MEM_CGROUP_RECLAIM_RETRIES;
+	bool drained = false;
 	unsigned long max;
 	int err;
 
@@ -5128,9 +5170,36 @@ static ssize_t memory_max_write(struct kernfs_open_file *of,
 	if (err)
 		return err;
 
-	err = mem_cgroup_resize_limit(memcg, max);
-	if (err)
-		return err;
+	xchg(&memcg->memory.limit, max);
+
+	for (;;) {
+		unsigned long nr_pages = page_counter_read(&memcg->memory);
+
+		if (nr_pages <= max)
+			break;
+
+		if (signal_pending(current)) {
+			err = -EINTR;
+			break;
+		}
+
+		if (!drained) {
+			drain_all_stock(memcg);
+			drained = true;
+			continue;
+		}
+
+		if (nr_reclaims) {
+			if (!try_to_free_mem_cgroup_pages(memcg, nr_pages - max,
+							  GFP_KERNEL, true))
+				nr_reclaims--;
+			continue;
+		}
+
+		mem_cgroup_events(memcg, MEMCG_OOM, 1);
+		if (!mem_cgroup_out_of_memory(memcg, GFP_KERNEL, 0))
+			break;
+	}
 
 	memcg_wb_domain_size_changed(memcg);
 	return nbytes;
@@ -5185,11 +5254,12 @@ struct cgroup_subsys memory_cgrp_subsys = {
 	.css_alloc = mem_cgroup_css_alloc,
 	.css_online = mem_cgroup_css_online,
 	.css_offline = mem_cgroup_css_offline,
+	.css_released = mem_cgroup_css_released,
 	.css_free = mem_cgroup_css_free,
 	.css_reset = mem_cgroup_css_reset,
 	.can_attach = mem_cgroup_can_attach,
 	.cancel_attach = mem_cgroup_cancel_attach,
-	.attach = mem_cgroup_move_task,
+	.post_attach = mem_cgroup_move_task,
 	.bind = mem_cgroup_bind,
 	.dfl_cftypes = memory_files,
 	.legacy_cftypes = mem_cgroup_legacy_files,
