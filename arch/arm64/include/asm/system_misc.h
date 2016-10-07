@@ -71,4 +71,6 @@ extern void (*arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd);
 int sea_register_handler_chain(struct notifier_block *nb);
 void sea_unregister_handler_chain(struct notifier_block *nb);
 
+int handle_guest_sea(unsigned long addr, unsigned int esr);
+
 #endif	/* __ASM_SYSTEM_MISC_H */
