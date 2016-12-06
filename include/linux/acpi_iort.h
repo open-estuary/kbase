@@ -36,6 +36,7 @@ u32 iort_msi_map_rid(struct device *dev, u32 req_id);
 int iort_pmsi_get_dev_id(struct device *dev, u32 *dev_id);
 struct irq_domain *iort_get_device_domain(struct device *dev, u32 req_id);
 /* IOMMU interface */
+void iort_set_dma_mask(struct device *dev);
 const struct iommu_ops *iort_iommu_configure(struct device *dev);
 void acpi_configure_pmsi_domain(struct device *dev);
 #else
@@ -54,6 +55,7 @@ static inline int iort_pmsi_get_dev_id(struct device *dev, u32 *dev_id)
 }
 
 /* IOMMU interface */
+static inline void iort_set_dma_mask(struct device *dev) { }
 static inline
 const struct iommu_ops *iort_iommu_configure(struct device *dev)
 { return NULL; }
