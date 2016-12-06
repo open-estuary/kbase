@@ -153,7 +153,6 @@ static int hisi_pcie_init(struct pci_config_window *cfg)
 	cfg->priv = reg_base;
 	if (!hisi_pcie_link_up_acpi(cfg)) {
 		dev_err(&adev->dev, "link status is down\n");
-		return -EINVAL;
 	}
 
 	return 0;
