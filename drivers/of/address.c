@@ -479,6 +479,55 @@ static int of_empty_ranges_quirk(struct device_node *np)
 	return false;
 }
 
+/*
+ * of_isa_indirect_io - get the IO address from some isa reg property value.
+ *	For some isa/lpc devices, no ranges property in ancestor node.
+ *	The device addresses are described directly in their regs property.
+ *	This fixup function will be called to get the IO address of isa/lpc
+ *	devices when the normal of_translation failed.
+ *
+ * @parent:	points to the parent dts node;
+ * @bus:		points to the of_bus which can be used to parse address;
+ * @addr:	the address from reg property;
+ * @na:		the address cell counter of @addr;
+ * @presult:	store the address paresed from @addr;
+ *
+ * return 0 when successfully get the I/O address;
+ * negative represents some failures.
+ */
+static int of_get_isa_indirect_io(struct device_node *dev_node,
+				const __be32 *addr, u64 *presult)
+{
+	unsigned int flags;
+	unsigned int rlen;
+
+	/* whether support indirectIO */
+	if (indirect_io_enabled()) {
+		struct device_node *parent;
+		struct of_bus *bus;
+
+		/* Get parent & match bus type */
+		parent = of_get_parent(dev_node);
+		if (!parent || !of_bus_isa_match(parent))
+			return -ENODEV;
+
+		bus = of_match_bus(parent);
+		flags = bus->get_flags(addr);
+		if (!(flags & IORESOURCE_IO))
+			return -EFAULT;
+
+		/* there is ranges property, apply the normal translation directly. */
+		if (of_get_property(parent, "ranges", &rlen))
+			return -ENXIO;
+
+		*presult = of_read_number(addr + 1, 1);
+		/* this fixup is only valid for specific I/O range. */
+		return addr_is_indirect_io(*presult) ? 0: -EINVAL;
+	}
+
+	return -ENODEV;
+}
+
 static int of_translate_one(struct device_node *parent, struct of_bus *bus,
 			    struct of_bus *pbus, __be32 *addr,
 			    int na, int ns, int pna, const char *rprop)
@@ -685,17 +734,27 @@ static int __of_address_to_resource(struct device_node *dev,
 	if ((flags & (IORESOURCE_IO | IORESOURCE_MEM)) == 0)
 		return -EINVAL;
 	taddr = of_translate_address(dev, addrp);
-	if (taddr == OF_BAD_ADDR)
-		return -EINVAL;
 	memset(r, 0, sizeof(struct resource));
 	if (flags & IORESOURCE_IO) {
 		unsigned long port;
-		port = pci_address_to_pio(taddr);
-		if (port == (unsigned long)-1)
-			return -EINVAL;
+
+		if (taddr != OF_BAD_ADDR) {
+			port = pci_address_to_pio(taddr);
+			if (port == (unsigned long)-1)
+				return -EINVAL;
+		} else {
+			if (of_get_isa_indirect_io(dev, addrp, &taddr) < 0)
+				return -EINVAL;
+
+			pr_debug("isa indirectIO matched(%s)..addr = 0x%llx\n",
+				of_node_full_name(dev), taddr);
+			port = taddr;
+		}
 		r->start = port;
 		r->end = port + size - 1;
 	} else {
+		if (taddr == OF_BAD_ADDR)
+			return -EINVAL;
 		r->start = taddr;
 		r->end = taddr + size - 1;
 	}
