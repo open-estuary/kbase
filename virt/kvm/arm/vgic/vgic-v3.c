@@ -26,6 +26,9 @@ static bool group1_trap;
 static bool common_trap;
 static bool gicv4_enable;
 
+DEFINE_STATIC_KEY_FALSE(hisi_vtimer_quirk_enabled);
+EXPORT_SYMBOL_GPL(hisi_vtimer_quirk_enabled);
+
 void vgic_v3_set_underflow(struct kvm_vcpu *vcpu)
 {
 	struct vgic_v3_cpu_if *cpuif = &vcpu->arch.vgic_cpu.vgic_v3;
@@ -492,6 +495,12 @@ int vgic_v3_probe(const struct gic_kvm_info *info)
 		kvm_vgic_global_state.has_gicv4 = gicv4_enable;
 		kvm_info("GICv4 support %sabled\n",
 			 gicv4_enable ? "en" : "dis");
+	}
+
+	/* HiSilicon Quirk: virt timer irqmap not supported */
+	if (info->hisi_vtimer_quirk) {
+		static_branch_enable(&hisi_vtimer_quirk_enabled);
+		pr_info("kvm: Enabling HiSilicon GIC virt timer quirk\n");
 	}
 
 	if (!info->vcpu.start) {

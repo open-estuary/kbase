@@ -839,9 +839,11 @@ int kvm_timer_enable(struct kvm_vcpu *vcpu)
 		return -EINVAL;
 	}
 
-	ret = kvm_vgic_map_phys_irq(vcpu, host_vtimer_irq, vtimer->irq.irq);
-	if (ret)
-		return ret;
+	if(!needs_hisi_vtimer_quirk()) {
+		ret = kvm_vgic_map_phys_irq(vcpu, host_vtimer_irq, vtimer->irq.irq);
+		if (ret)
+			return ret;
+	}
 
 no_vgic:
 	preempt_disable();
