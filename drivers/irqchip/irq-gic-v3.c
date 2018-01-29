@@ -281,6 +281,11 @@ static int gic_irq_get_irqchip_state(struct irq_data *d,
 	return 0;
 }
 
+void gic_eoi_timer_irq(unsigned int hwirq)
+{
+	gic_write_dir(hwirq);
+}
+
 static void gic_eoi_irq(struct irq_data *d)
 {
 	gic_write_eoir(gic_irq(d));
@@ -1486,9 +1491,9 @@ static void __init acpi_madt_oem_check(char *oem_id, char *oem_table_id)
 	 * Workaround for D02 and D03, disable virt timer interrupt
 	 * mapping because GIC on D02 and D03 don't support that
 	 */
-	if (!strncmp(oem_id, "HISI", 4) &&
+	if (!strncmp(oem_id, "HISI  ", 4) &&
 		(!strncmp(oem_table_id, "HISI-D02", 8) ||
-			!strncmp(oem_table_id, "HISI-D03", 8)))
+			!strncmp(oem_table_id, "HIP06   ", 8)))
 		gic_v3_kvm_info.hisi_vtimer_quirk = true;
 }
 

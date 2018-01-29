@@ -22,6 +22,7 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/uaccess.h>
+#include <linux/irqchip/arm-gic-v3.h>
 
 #include <clocksource/arm_arch_timer.h>
 #include <asm/arch_timer.h>
@@ -31,6 +32,8 @@
 #include <kvm/arm_arch_timer.h>
 
 #include "trace.h"
+
+static unsigned int timer_irq_cnt = 0;
 
 static struct timecounter *timecounter;
 static unsigned int host_vtimer_irq;
@@ -69,6 +72,20 @@ static void soft_timer_cancel(struct hrtimer *hrt, struct work_struct *work)
 		cancel_work_sync(work);
 }
 
+void kvm_timer_irq_eoi(struct kvm_vcpu *vcpu, unsigned int irq)
+{
+	struct arch_timer_context *vtimer = vcpu_vtimer(vcpu);
+	unsigned long flags;
+
+	if (vtimer->irq.irq == irq) {
+		local_irq_save(flags);
+		gic_eoi_timer_irq(vtimer->irq.irq);
+		local_irq_restore(flags);
+		kvm_timer_update_irq(vcpu, false, vtimer);
+		trace_printk("%s: timer_irq_cnt %d\n", __func__, timer_irq_cnt);
+	}
+}
+
 static void kvm_vtimer_update_mask_user(struct kvm_vcpu *vcpu)
 {
 	struct arch_timer_context *vtimer = vcpu_vtimer(vcpu);
@@ -94,6 +111,7 @@ static irqreturn_t kvm_arch_timer_handler(int irq, void *dev_id)
 	struct arch_timer_context *vtimer;
 	u32 cnt_ctl;
 
+	timer_irq_cnt++;
 	/*
 	 * We may see a timer interrupt after vcpu_put() has been called which
 	 * sets the CPU's vcpu pointer to NULL, because even though the timer
@@ -104,12 +122,16 @@ static irqreturn_t kvm_arch_timer_handler(int irq, void *dev_id)
 		return IRQ_HANDLED;
 
 	vtimer = vcpu_vtimer(vcpu);
-	if (!vtimer->irq.level) {
+	if (vtimer->loaded  && !vtimer->irq.level) {
 		cnt_ctl = read_sysreg_el0(cntv_ctl);
 		cnt_ctl &= ARCH_TIMER_CTRL_ENABLE | ARCH_TIMER_CTRL_IT_STAT |
 			   ARCH_TIMER_CTRL_IT_MASK;
 		if (cnt_ctl == (ARCH_TIMER_CTRL_ENABLE | ARCH_TIMER_CTRL_IT_STAT))
 			kvm_timer_update_irq(vcpu, true, vtimer);
+	} else {
+		trace_printk("%s, Unexpected timer irq: cpu %d vcpu %d loaded %d level %d cnt %d\n",
+			__func__, vcpu->cpu, vcpu->vcpu_id, vtimer->loaded,
+			vtimer->irq.level, timer_irq_cnt);
 	}
 
 	if (unlikely(!irqchip_in_kernel(vcpu->kvm)))
@@ -850,6 +872,7 @@ no_vgic:
 	timer->enabled = 1;
 	kvm_timer_vcpu_load(vcpu);
 	preempt_enable();
+	timer_irq_cnt = 0;
 
 	return 0;
 }

@@ -62,6 +62,9 @@ void vgic_v3_fold_lr_state(struct kvm_vcpu *vcpu)
 		else
 			intid = val & GICH_LR_VIRTUALID;
 
+		if (needs_hisi_vtimer_quirk() && lr_signals_eoi_mi(val))
+			kvm_timer_irq_eoi(vcpu, intid);
+
 		/* Notify fds when the guest EOI'ed a level-triggered IRQ */
 		if (lr_signals_eoi_mi(val) && vgic_valid_spi(vcpu->kvm, intid))
 			kvm_notify_acked_irq(vcpu->kvm, 0,
